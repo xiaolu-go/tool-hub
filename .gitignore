@@ -13,3 +13,6 @@ Thumbs.db
 playwright-report/
 test-results/
 .qa/
+
+# Personal pension records chosen inside this workspace
+**/tool-hub-pension-records.json

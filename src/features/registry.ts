@@ -7,7 +7,7 @@ export const tools = [
     description: '把今天的积累，变成明天的从容。比较不同收益假设，看清每一年的存入、领取与余额。',
     icon: ChartNoAxesCombined, status: 'available' as const, path: '/tools/pension-calculator',
     component: lazy(() => import('./pension-calculator/CalculatorPage')),
-    tags: ['年度测算', '双方案对比'],
+    tags: ['年度测算', '方案记录'],
   },
   {
     id: 'income-planner', name: '收支规划',

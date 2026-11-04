@@ -1,112 +1,124 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import CalculatorPage from '../src/features/pension-calculator/CalculatorPage';
+import { fileFixture } from './file-fixture';
+import { createDefaultDraft } from '../src/features/pension-calculator/domain/validation';
 import { STORAGE_KEY } from '../src/lib/storage';
+import { RECORD_FILENAME } from '../src/lib/record-files';
 
 vi.mock('../src/features/pension-calculator/ResultCharts', () => ({ default: () => <div>年度图表</div> }));
-
+let files: ReturnType<typeof fileFixture>;
 beforeEach(() => {
-  cleanup();
-  window.localStorage.clear();
-  vi.restoreAllMocks();
-  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false })));
+  cleanup(); vi.restoreAllMocks(); window.localStorage.clear();
+  files = fileFixture(); window.showDirectoryPicker = vi.fn(async () => files.folder);
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
   HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
 });
-
 function open() { return render(<MemoryRouter><CalculatorPage /></MemoryRouter>); }
+function fill(index = 1, name = '银行计划', type = 'bank') {
+  const values: Record<string, string> = { '类型': type, '方案名称': name, '开始存入': '40', '年存入额（元）': '10000', '存入年数': '2', '年化率（%）': '10', '开始领取': '43', '年领取额（元）': '5000', '领取至': '45' };
+  for (const [label, value] of Object.entries(values)) fireEvent.change(screen.getByLabelText(`第 ${index} 行${label}`, { exact: true }), { target: { value } });
+}
+async function choose() { await userEvent.click(screen.getByRole('button', { name: '选择记录文件夹' })); }
+async function submit() { await userEvent.click(screen.getByRole('button', { name: '测算并保存' })); }
+const history = () => within(screen.getByRole('region', { name: '测算记录' }));
 
-describe('计算器关键交互', () => {
-  it('共用计划只出现一组，切换年龄后可测算与恢复，年龄错误定位到对应字段', async () => {
-    const view = open();
-    expect(screen.getAllByLabelText('每年存入金额')).toHaveLength(1);
-    expect(screen.getAllByLabelText('每年计划领取金额')).toHaveLength(1);
-    await userEvent.click(screen.getByRole('radio', { name: '按年龄' }));
-    expect(screen.queryByLabelText('测算起始年份')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('领取结束年龄'), { target: { value: '106' } });
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(screen.getByLabelText('领取结束年龄')).toHaveFocus();
-    fireEvent.change(screen.getByLabelText('领取结束年龄'), { target: { value: '85' } });
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(screen.getByRole('columnheader', { name: '年龄' })).toBeInTheDocument();
-    expect(screen.getByRole('rowheader', { name: '85 岁' })).toBeInTheDocument();
-    view.unmount();
-    open();
+describe('文件夹与独立方案录入', () => {
+  it('默认年龄、两个空行，空表提示；部分行缺项定位，不能部分保存', async () => {
+    open(); expect(screen.getByRole('radio', { name: '按年龄' })).toBeChecked();
+    expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue('');
+    expect(screen.getByLabelText('第 2 行方案名称')).toHaveValue('');
+    await submit(); expect(screen.getByRole('alert')).toHaveTextContent('至少完整填写一行');
+    await choose(); fill();
+    fireEvent.change(screen.getByLabelText('第 2 行方案名称'), { target: { value: '未填完' } });
+    await submit(); expect(screen.getByRole('alert')).toHaveTextContent('尚未填写完整');
+    expect(screen.getByLabelText('第 2 行类型')).toHaveFocus(); expect(files.read()).toBeNull();
+  });
+  it('成功写文件才清空两行，独立银行保险计息，并且不写浏览器记录', async () => {
+    open(); await choose(); fill(); fill(2, '保险计划', 'insurance');
+    const writing = vi.spyOn(Storage.prototype, 'setItem');
+    await submit();
+    await waitFor(() => expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue(''));
+    const saved = JSON.parse(files.read()!);
+    expect(saved.records).toHaveLength(2);
+    expect(saved.records[0].result.records[0].interest).toBe('1000.00');
+    expect(saved.records[1].result.records[0].interest).toBe('0.00');
+    expect(writing).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('第 2 行方案名称')).toHaveValue('');
+    expect(history().getByRole('rowheader', { name: '保险计划' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '测算结果' })).toBeInTheDocument();
+  });
+  it('未选文件夹或保存失败均保留录入；旧文件不受影响', async () => {
+    open(); fill(); await submit(); expect(screen.getByRole('alert')).toHaveTextContent('请先选择记录文件夹');
+    expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue('银行计划');
+    await choose(); files.fail(); await submit();
+    expect(screen.getByRole('alert')).toHaveTextContent('保存失败');
+    expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue('银行计划');
+    expect(screen.queryByRole('region', { name: '测算结果' })).not.toBeInTheDocument();
+  });
+  it('查询、查看、编辑更新原记录、取消及确认删除都反映在文件中', async () => {
+    open(); await choose(); fill(); fill(2, '保险计划', 'insurance'); await submit();
+    await userEvent.type(screen.getByRole('textbox', { name: '搜索记录' }), '保险');
+    expect(history().queryByRole('rowheader', { name: '银行计划' })).not.toBeInTheDocument();
+    await userEvent.click(history().getByRole('button', { name: '查看' }));
+    expect(screen.getByRole('combobox', { name: '查看方案明细' })).toHaveTextContent('保险计划');
+    const before = JSON.parse(files.read()!).records.find((e: { result: { input: { name: string } } }) => e.result.input.name === '保险计划');
+    await userEvent.click(history().getByRole('button', { name: '编辑' }));
+    fireEvent.change(screen.getByLabelText('第 1 行方案名称'), { target: { value: '保险新计划' } });
+    await userEvent.click(screen.getByRole('button', { name: '重新测算并保存' }));
+    const after = JSON.parse(files.read()!).records.find((e: { id: string }) => e.id === before.id);
+    expect(after.result.input.name).toBe('保险新计划'); expect(after.createdAt).toBe(before.createdAt);
+    expect(JSON.parse(files.read()!).records).toHaveLength(2);
+    await userEvent.click(history().getByRole('button', { name: '删除' }));
+    await userEvent.click(screen.getByRole('button', { name: '保留记录' }));
+    expect(JSON.parse(files.read()!).records).toHaveLength(2);
+    await userEvent.click(history().getByRole('button', { name: '删除' }));
+    await userEvent.click(screen.getByRole('button', { name: '确认删除' }));
+    expect(JSON.parse(files.read()!).records).toHaveLength(1);
+  }, 10000);
+  it('刷新后表单仍空，重新选择文件夹可读记录；新增行与时间切换有明确边界', async () => {
+    const view = open(); await choose(); fill(); await submit(); view.unmount(); open();
     expect(screen.getByRole('radio', { name: '按年龄' })).toBeChecked();
-    expect(screen.getByLabelText('领取结束年龄')).toHaveValue('85');
-    await userEvent.click(screen.getByRole('radio', { name: '按年份' }));
-    expect(screen.getByLabelText('测算起始年份')).not.toHaveValue('35');
-    expect(screen.getByRole('button', { name: '导出明细' })).toBeDisabled();
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(screen.getByRole('columnheader', { name: '年份' })).toBeInTheDocument();
-  });
-
-  it('首次不显示虚构结果，提交后生成双方案结果与可用导出', async () => {
-    open();
-    expect(screen.getByText('未来，从一份计划开始')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '导出明细' })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(await screen.findByText('看看未来的不同可能')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '导出明细' })).toBeEnabled();
-    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).input.annualDeposit).toBe('10000.00');
-    await userEvent.click(screen.getByRole('button', { name: '方案 B' }));
-    expect(screen.getByText('当前查看：方案 B · 保险假设方案')).toBeInTheDocument();
-  });
-
-  it('编辑后禁用旧结果导出，无效提交聚焦错误并保留上次保存', async () => {
-    open();
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-    const amount = screen.getByLabelText('每年存入金额');
-    fireEvent.change(amount, { target: { value: '' } });
-    expect(screen.getByRole('button', { name: '导出明细' })).toBeDisabled();
-    expect(screen.getByText(/参数已修改，请重新测算/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(amount).toHaveFocus();
-    expect(amount).toHaveAttribute('aria-invalid', 'true');
-    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(saved);
-    expect(screen.getByText('看看未来的不同可能')).toBeInTheDocument();
-    fireEvent.change(amount, { target: { value: '20000' } });
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(screen.getByRole('button', { name: '导出明细' })).toBeEnabled();
-    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).input.annualDeposit).toBe('20000.00');
-  });
-
-  it('重新挂载恢复最后成功参数，忽略未提交的编辑', async () => {
-    const view = open();
-    fireEvent.change(screen.getByLabelText('每年存入金额'), { target: { value: '12345.67' } });
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    fireEvent.change(screen.getByLabelText('每年存入金额'), { target: { value: '9' } });
-    view.unmount();
-    open();
-    expect(screen.getByLabelText('每年存入金额')).toHaveValue('12345.67');
-    expect(screen.getByText('看看未来的不同可能')).toBeInTheDocument();
-  });
-
-  it('恢复默认需确认，取消不更改数据，确认仅清除当前工具', async () => {
-    open();
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    window.localStorage.setItem('other-tool', 'keep');
-    await userEvent.click(screen.getByRole('button', { name: '恢复默认' }));
-    const dialog = screen.getByRole('dialog');
-    await userEvent.click(within(dialog).getByRole('button', { name: '保留设置' }));
-    expect(window.localStorage.getItem(STORAGE_KEY)).not.toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: '恢复默认' }));
-    await userEvent.click(screen.getByRole('button', { name: '确认恢复' }));
-    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
-    expect(window.localStorage.getItem('other-tool')).toBe('keep');
-    expect(screen.getByText('未来，从一份计划开始')).toBeInTheDocument();
-  });
-
-  it('写入失败时仍显示可用结果与导出', async () => {
-    open();
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota'); });
-    await userEvent.click(screen.getByRole('button', { name: '开始测算' }));
-    expect(screen.getByText('测算已完成。本次设置未能保存到浏览器。')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '导出明细' })).toBeEnabled();
+    expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue('');
+    await choose(); expect(history().getByRole('rowheader', { name: '银行计划' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '添加方案' }));
+    expect(screen.getByLabelText('第 3 行方案名称')).toHaveValue('');
+    fill(); await userEvent.click(screen.getByRole('radio', { name: '按年份' }));
+    expect(screen.getByLabelText('第 1 行开始存入')).toHaveValue('');
+    expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue('银行计划');
+    expect(screen.getByRole('columnheader', { name: '开始领取（年份）' })).toBeInTheDocument();
+  }, 10000);
+  it('显式导入旧版设置写成文件，保险保留旧计息规则，编辑才更新版本', async () => {
+    const draft = createDefaultDraft(2030);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ storageVersion: 1, modelVersion: 2, savedAt: '2026-11-04', input: draft }));
+    open(); await choose();
+    await userEvent.click(screen.getByRole('button', { name: '导入旧版测算' }));
+    const saved = JSON.parse(files.read()!).records;
+    expect(saved).toHaveLength(2); expect(saved[1].ruleVersion).toBe(2);
+    expect(saved[1].result.records[0].interest).toBe('300.00');
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeTruthy();
+    await userEvent.click(history().getAllByRole('button', { name: '编辑' })[0]);
+    await userEvent.click(screen.getByRole('button', { name: '重新测算并保存' }));
+    expect(JSON.parse(files.read()!).records.find((e: { id: string }) => e.id === saved[1].id).ruleVersion).toBe(3);
+  }, 10000);
+  it('年龄不超过 105；文件取消、损坏和不支持时不丢录入', async () => {
+    open(); await choose(); fill();
+    fireEvent.change(screen.getByLabelText('第 1 行领取至'), { target: { value: '106' } });
+    await submit(); expect(screen.getByLabelText('第 1 行领取至')).toHaveFocus();
+    files.replace('broken json'); await userEvent.click(screen.getByRole('button', { name: '重新读取' }));
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.getByLabelText('第 1 行方案名称')).toHaveValue('银行计划');
+    window.showDirectoryPicker = vi.fn(async () => { throw new DOMException('cancel', 'AbortError'); });
+    await userEvent.click(screen.getByRole('button', { name: '切换文件夹' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    window.showDirectoryPicker = undefined;
+    await userEvent.click(screen.getByRole('button', { name: '切换文件夹' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('暂不支持');
+    expect(screen.getByText(new RegExp(RECORD_FILENAME))).toBeInTheDocument();
   });
 });

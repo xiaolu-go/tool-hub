@@ -1,223 +1,190 @@
 import { lazy, Suspense, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router';
-import { ArrowDownToLine, ArrowLeft, ArrowRight, Calculator, Check, ChevronDown, Info, LockKeyhole, RotateCcw, SlidersHorizontal, Sparkles } from 'lucide-react';
-import { Field, SectionHeading } from '../../components/Field';
+import { ArrowDownToLine, ArrowLeft, Calculator, FolderOpen, Plus, Search, Trash2 } from 'lucide-react';
 import { formatMoney } from '../../lib/format';
-import { downloadCsv } from '../../lib/csv';
-import { browserStorage, clearPlan, restorePlan, savePlan } from '../../lib/storage';
-import { calculatePlan } from './domain/calculate';
-import { Money, money } from './domain/money';
-import { createDefaultDraft, validateDraft } from './domain/validation';
-import { timeLabel, timeUnit } from './domain/time';
-import type { CalculationResult, PlanDraft, ScenarioResult } from './domain/types';
+import { downloadEntries } from '../../lib/entry-csv';
+import { readRecordFile, writeRecordFile, RECORD_FILENAME, type RecordFolder, type RecordFile } from '../../lib/record-files';
+import { restorePlan, browserStorage } from '../../lib/storage';
+import { calculateEntry, emptyEntry, entryToDraft, isEmptyEntry, productNames, validateEntry, type EntryDraft, type SavedEntry, type TimeBasis } from './domain/entries';
 import styles from './Calculator.module.css';
 
 const ResultCharts = lazy(() => import('./ResultCharts'));
-
-function initialize() {
-  const restored = restorePlan(browserStorage());
-  return {
-    draft: restored.status === 'restored' ? restored.draft : createDefaultDraft(new Date().getFullYear()),
-    result: restored.status === 'restored' ? restored.result : null,
-    notice: restored.status === 'invalid' ? '已保存的数据无法恢复，请重新设置。' : restored.status === 'restored' ? '已恢复最近一次成功测算的设置。' : '',
-  };
+const columns: { key: keyof EntryDraft; title: string; mode?: 'decimal' | 'numeric' | 'text' }[] = [
+  { key: 'type', title: '类型' }, { key: 'name', title: '方案名称', mode: 'text' }, { key: 'start', title: '开始存入' },
+  { key: 'annualDeposit', title: '年存入额（元）', mode: 'decimal' }, { key: 'depositYears', title: '存入年数' },
+  { key: 'rate', title: '年化率（%）', mode: 'decimal' }, { key: 'withdrawalStart', title: '开始领取' },
+  { key: 'annualWithdrawal', title: '年领取额（元）', mode: 'decimal' }, { key: 'end', title: '领取至' },
+];
+const detailColumns = [ ['openingBalance', '年初余额'], ['deposit', '当年存入'], ['interest', '当年收益'], ['plannedWithdrawal', '计划领取'], ['withdrawal', '实际领取'], ['shortfall', '领取缺口'], ['closingBalance', '年末余额'], ['cumulativeDeposit', '累计存入'], ['cumulativeWithdrawal', '累计领取'], ['cumulativeInterest', '累计收益'] ] as const;
+const unit = (basis: TimeBasis) => basis === 'age' ? '岁' : '年';
+function errorText(error: unknown) {
+  if (error instanceof SyntaxError) return '记录文件内容损坏或不是有效 JSON，原文件未修改，请选择正确文件夹。';
+  if (error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name)) return '未获得文件夹读写权限，请重新选择并授权。当前录入内容已保留。';
+  if (error instanceof DOMException && ['NotReadableError', 'NoModificationAllowedError'].includes(error.name)) return '记录文件暂时无法读写，请检查文件是否被占用或文件夹是否可写。当前录入内容已保留。';
+  return error instanceof Error ? error.message : '操作未完成，请重试。';
 }
 
-function ScenarioCard({ item, result }: { item: ScenarioResult; result: CalculationResult }) {
-  const { summary: s, scenario } = item;
-  let status = '计划结束';
-  if (s.depletionYear !== null) status = s.depletionYear < result.input.withdrawalStartYear ? '开始领取前资金已耗尽' : `${timeLabel(result.input, s.depletionYear)}资金耗尽`;
-  else if (s.status === 'horizon-reached') status = `截至 ${timeLabel(result.input, result.endYear)}尚未耗尽`;
-  const metrics = [
-    ['首次领取前资金', s.beforeFirstWithdrawal], ['累计存入', s.totalDeposit],
-    ['累计收益', s.totalInterest], ['期末余额', s.endingBalance],
-  ];
-  return <article className={`${styles.scenarioCard} ${scenario.id === 'B' ? styles.scenarioB : ''}`}>
-    <div className={styles.scenarioCardHead}><span className={styles.scenarioLetter}>{scenario.id}</span><h3>{scenario.name}</h3><span>{scenario.annualRate}% <small>/ 年</small></span></div>
-    <div className={styles.mainMetric}><span>累计实际领取 <small>元</small></span><strong title={formatMoney(s.totalWithdrawal)}>{formatMoney(s.totalWithdrawal)}</strong></div>
-    <dl className={styles.metrics}>{metrics.map(([label, value]) => <div key={label}><dt>{label}<small> 元</small></dt><dd>{formatMoney(value)}</dd></div>)}</dl>
-    <div className={styles.yearsMetric}><span>足额领取 <strong>{s.fullWithdrawalYears}</strong> 年</span><span>有领取 <strong>{s.paidYears}</strong> 年</span></div>
-    <div className={styles.scenarioStatus}><span><i />{status}</span><p>首次不足额：{s.firstShortfallYear === null ? '测算期内未出现' : timeLabel(result.input, s.firstShortfallYear)}</p></div>
-    {s.totalShortfall !== null && <div className={styles.planStatus}>{new Money(s.totalShortfall).isZero() ? <><Check size={13} /> 计划全部足额完成</> : <><Info size={13} /> 计划存在缺口：{formatMoney(s.totalShortfall)} 元</>}</div>}
-  </article>;
-}
-
-const detailColumns = [
-  ['openingBalance', '年初余额'], ['deposit', '当年存入'], ['interest', '当年收益'],
-  ['plannedWithdrawal', '计划领取'], ['withdrawal', '实际领取'], ['shortfall', '领取缺口'],
-  ['closingBalance', '年末余额'], ['cumulativeDeposit', '累计存入'],
-  ['cumulativeWithdrawal', '累计领取'], ['cumulativeInterest', '累计收益'],
-] as const;
-
-function Results({ result, dirty }: { result: CalculationResult; dirty: boolean }) {
-  const [selected, setSelected] = useState(0);
-  const item = result.scenarios[selected];
-  const input = result.input;
-  return <div className={styles.resultContent}>
-    <div className={styles.resultTitle}><div><span className={styles.eyebrow}>YOUR PLAN, YEAR BY YEAR</span><h2>看看未来的不同可能</h2></div><button type="button" className="button secondary" disabled={dirty} onClick={() => downloadCsv(result)}><ArrowDownToLine size={15} />导出明细</button></div>
-    {dirty && <div className={styles.dirtyNotice} role="status"><Info size={15} /> 参数已修改，请重新测算。下方仍为上次成功测算的结果。</div>}
-    <section className={styles.overview} aria-label="本次测算计划">
-      <div><span>存入计划总额</span><strong>{formatMoney(money(new Money(input.annualDeposit).times(input.depositYears)))}<small> 元</small></strong></div>
-      <div><span>开始领取</span><strong>{input.withdrawalStartYear}<small> {timeUnit(input)}</small></strong></div>
-      <div><span>{input.timeBasis === 'age' ? '测算年龄范围' : '测算时间范围'}</span><strong>{result.startYear} — {result.endYear}<small> {timeUnit(input)}</small></strong></div>
-      <p>最后存入 {timeLabel(input, input.startYear + input.depositYears - 1)} · 等待 {input.withdrawalStartYear - input.startYear - input.depositYears} 年 · {input.mode === 'fixed' ? `计划领取 ${input.withdrawalYears} 年${input.timeBasis === 'age' ? '（含结束年龄当年）' : ''}` : '领至耗尽，最多测算 120 年'}</p>
-    </section>
-    <div className={styles.scenarioGrid}>{result.scenarios.map(s => <ScenarioCard key={s.scenario.id} item={s} result={result} />)}</div>
-    <div className={styles.difference}><span>方案差额 <small>B − A</small></span><div>累计领取 <strong>{formatMoney(result.difference.totalWithdrawal, true)} 元</strong></div><div>期末余额 <strong>{formatMoney(result.difference.endingBalance, true)} 元</strong></div><div>足额领取 <strong>{result.difference.fullWithdrawalYears > 0 ? '+' : ''}{result.difference.fullWithdrawalYears} 年</strong></div></div>
-    {result.horizonReached && <p className={styles.limitNotice}><Info size={14} /> 已达到 120 年测算上限，“尚未耗尽”不代表可以无限领取。</p>}
-    <Suspense fallback={<div className={styles.chartFallback}>正在准备年度图表…</div>}><ResultCharts result={result} /></Suspense>
-    <section className={styles.detailCard} aria-labelledby="detail-title">
-      <div className={styles.detailHeader}><div><h2 id="detail-title">每一年的资金明细</h2><p>金额单位：元 · 共 {item.records.length} 年</p></div><div className={styles.scenarioSwitch} role="group" aria-label="选择明细方案">{result.scenarios.map((s, i) => <button key={s.scenario.id} type="button" aria-pressed={selected === i} onClick={() => setSelected(i)}>方案 {s.scenario.id}</button>)}</div></div>
-      <div className={styles.tableLabel}>当前查看：方案 {item.scenario.id} · {item.scenario.name}</div>
-      <div className={styles.tableScroll} tabIndex={0} role="region" aria-label="年度明细，可横向滚动"><table><caption className={styles.srOnly}>方案 {item.scenario.id} {item.scenario.name} 的年度资金明细，金额单位元</caption><thead><tr><th scope="col">{input.timeBasis === 'age' ? '年龄' : '年份'}</th><th scope="col">阶段</th>{detailColumns.map(([key, title]) => <th scope="col" key={key}>{title}</th>)}</tr></thead><tbody>{item.records.map(r => <tr key={r.year}><th scope="row">{r.year}{input.timeBasis === 'age' ? ' 岁' : ''}</th><td><span className={`${styles.phaseTag} ${r.phase === '领取期' ? styles.withdrawalTag : ''}`}>{r.phase}</span></td>{detailColumns.map(([key]) => <td key={key} className={key === 'closingBalance' ? styles.balanceCell : key === 'shortfall' && new Money(r.shortfall).gt(0) ? styles.shortfallCell : undefined}>{formatMoney(r[key])}</td>)}</tr>)}</tbody></table></div>
-      <p className={styles.tableHint}>左右滚动查看全部字段。表格、图表与导出均使用同一组测算结果。</p>
-    </section>
-  </div>;
-}
-
-function Timeline({ draft, endYear }: { draft: PlanDraft; endYear?: number }) {
-  const checked = validateDraft(draft);
-  if (!checked.ok) return <div className={styles.timelinePlaceholder}>完善参数后，即可预览存入与领取时间线。</div>;
-  const p = checked.value;
-  const lastDeposit = p.startYear + p.depositYears - 1;
-  const wait = p.withdrawalStartYear - lastDeposit - 1;
-  const end = p.mode === 'fixed' ? p.withdrawalStartYear + p.withdrawalYears! - 1 : endYear;
-  return <div className={styles.timeline} aria-label="计划时间线">
-    <div><i /><span>存入 {p.depositYears} 年</span><strong>{p.startYear}—{lastDeposit} {timeUnit(p)}</strong></div>
-    <div><i /><span>{wait === 0 ? '无等待期' : `等待 ${wait} 年`}</span><strong>{wait === 0 ? '衔接领取' : `${lastDeposit + 1}—${p.withdrawalStartYear - 1} ${timeUnit(p)}`}</strong></div>
-    <div><i /><span>按年领取</span><strong>{p.withdrawalStartYear}—{end ?? '耗尽或上限'} {end ? timeUnit(p) : ''}</strong></div>
-  </div>;
+function ResultView({ entries }: { entries: SavedEntry[] }) {
+  const [selected, setSelected] = useState(entries[0].id);
+  const entry = entries.find(e => e.id === selected) ?? entries[0];
+  const { input: p, summary: s, records } = entry.result;
+  return <section className={styles.results} aria-label="测算结果">
+    <div className={styles.sectionTitle}><div><span className={styles.eyebrow}>YOUR PLAN, YEAR BY YEAR</span><h2>测算结果</h2></div><button className="button secondary" onClick={() => downloadEntries(entries)}><ArrowDownToLine size={15} />导出明细</button></div>
+    <div className={styles.tableScroll} tabIndex={0} role="region" aria-label="方案测算汇总，可横向滚动"><table className={styles.summaryTable}><caption className={styles.srOnly}>各独立方案的测算汇总，金额单位元</caption><thead><tr>{['方案名称', '类型', '时间范围', '存入总额', '累计收益', '累计领取', '期末余额', '足额领取', '首次不足额'].map(t => <th key={t}>{t}</th>)}</tr></thead><tbody>{entries.map(e => {
+      const i = e.result.input, x = e.result.summary;
+      return <tr key={e.id}><th scope="row">{i.name}{e.ruleVersion === 2 && <small className={styles.legacy}>旧版规则</small>}</th><td>{productNames[i.type]}</td><td>{i.start}—{i.end} {unit(i.timeBasis)}</td><td>{formatMoney(x.totalDeposit)}</td><td>{formatMoney(x.totalInterest)}</td><td>{formatMoney(x.totalWithdrawal)}</td><td>{formatMoney(x.endingBalance)}</td><td>{x.fullWithdrawalYears} 年</td><td>{x.firstShortfallYear === null ? '无' : `${x.firstShortfallYear} ${unit(i.timeBasis)}`}</td></tr>;
+    })}</tbody></table></div>
+    <div className={styles.detailHeading}><label>查看方案明细 <select aria-label="查看方案明细" value={entry.id} onChange={e => setSelected(e.target.value)}>{entries.map(e => <option key={e.id} value={e.id}>{e.result.input.name} · {productNames[e.result.input.type]}</option>)}</select></label><p>{p.start} {unit(p.timeBasis)}开始存入 · {p.withdrawalStart} {unit(p.timeBasis)}开始领取 · 领至 {p.end} {unit(p.timeBasis)}（含当年）</p></div>
+    <p className={styles.resultNote}>首次领取前资金 {formatMoney(s.beforeFirstWithdrawal)} 元 · {s.depletionYear === null ? '测算结束时仍有余额' : `${s.depletionYear} ${unit(p.timeBasis)}资金耗尽`} · 计划领取缺口 {formatMoney(s.totalShortfall ?? '0.00')} 元</p>
+    {entry.ruleVersion === 2 && <p className={styles.notice}>此记录使用旧版规则：银行与保险均从第一年计息。编辑后重算将应用当前规则。</p>}
+    <Suspense fallback={<p>正在准备年度图表…</p>}><ResultCharts result={entry.result} /></Suspense>
+    <div className={styles.sectionTitle}><h3>每一年的资金明细</h3><span>金额单位：元 · 共 {records.length} 年</span></div>
+    <div className={`${styles.tableScroll} ${styles.annualScroll}`} tabIndex={0} role="region" aria-label="年度明细，可横向滚动"><table><caption className={styles.srOnly}>{p.name} 的年度资金明细</caption><thead><tr><th>{p.timeBasis === 'age' ? '年龄' : '年份'}</th><th>阶段</th>{detailColumns.map(([key, title]) => <th key={key}>{title}</th>)}</tr></thead><tbody>{records.map(r => <tr key={r.year}><th scope="row">{r.year}{p.timeBasis === 'age' ? ' 岁' : ''}</th><td>{r.phase}</td>{detailColumns.map(([key]) => <td key={key}>{formatMoney(r[key])}</td>)}</tr>)}</tbody></table></div>
+    <p className={styles.hint}>左右滚动查看全部字段。汇总、图表与导出使用同一份结果；各方案按自身的起止时间测算。</p>
+  </section>;
 }
 
 export default function CalculatorPage() {
-  const [initial] = useState(initialize);
-  const [draft, setDraft] = useState(initial.draft);
-  const [result, setResult] = useState<CalculationResult | null>(initial.result);
-  const [notice, setNotice] = useState(initial.notice);
-  const [dirty, setDirty] = useState(false);
-  const [attempted, setAttempted] = useState(false);
-  const [resetOpen, setResetOpen] = useState(false);
-  const formRef = useRef<HTMLFormElement>(null);
-  const resetDialogRef = useRef<HTMLDialogElement>(null);
-  const resetButtonRef = useRef<HTMLButtonElement>(null);
-  const resultRef = useRef<HTMLDivElement>(null);
-  const validated = useMemo(() => validateDraft(draft), [draft]);
-  const errors = attempted && !validated.ok ? validated.errors : {};
+  const [basis, setBasis] = useState<TimeBasis>('age');
+  const [rows, setRows] = useState<EntryDraft[]>([emptyEntry(), emptyEntry()]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [folder, setFolder] = useState<RecordFolder | null>(null);
+  const [file, setFile] = useState<RecordFile>({ revision: null, records: [] });
+  const [shown, setShown] = useState<SavedEntry[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [notice, setNotice] = useState('');
+  const [problem, setProblem] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [deleting, setDeleting] = useState<SavedEntry | null>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const form = useRef<HTMLFormElement>(null);
+  const entryScroll = useRef<HTMLDivElement>(null);
+  const lock = useRef(false);
+  const records = useMemo(() => file.records.filter(e => (filter === 'all' || e.result.input.type === filter) && `${e.result.input.name} ${productNames[e.result.input.type]}`.toLowerCase().includes(query.trim().toLowerCase())).slice().reverse(), [file.records, filter, query]);
 
-  function edit(key: keyof Omit<PlanDraft, 'scenarios'>, value: string) {
-    setDraft(previous => ({ ...previous, [key]: value }));
-    setDirty(true);
+  async function action(work: () => Promise<void>) {
+    if (lock.current) return;
+    lock.current = true; setBusy(true); setProblem('');
+    try { await work(); } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) setProblem(errorText(error));
+    } finally { lock.current = false; setBusy(false); }
   }
-  function editScenario(index: number, key: 'name' | 'annualRate', value: string) {
-    setDraft(previous => ({ ...previous, scenarios: previous.scenarios.map((s, i) => i === index ? { ...s, [key]: value } : s) as PlanDraft['scenarios'] }));
-    setDirty(true);
-  }
-  function switchTimeBasis(timeBasis: PlanDraft['timeBasis']) {
-    setDraft(previous => {
-      const defaults = createDefaultDraft(new Date().getFullYear());
-      return {
-        ...previous, timeBasis,
-        startYear: previous.startYear || defaults.startYear,
-        withdrawalStartYear: previous.withdrawalStartYear || defaults.withdrawalStartYear,
-        withdrawalYears: previous.withdrawalYears || defaults.withdrawalYears,
-      };
+  async function pickFolder() {
+    if (!window.showDirectoryPicker) { setProblem('此浏览器暂不支持直接保存文件夹。请使用电脑上的 Microsoft Edge 或 Chrome 打开本工具。'); return; }
+    await action(async () => {
+      const picked = await window.showDirectoryPicker!({ mode: 'readwrite', id: 'tool-hub-pension' });
+      const loaded = await readRecordFile(picked);
+      setFolder(picked); setFile(loaded); setShown([]); setEditing(null); setErrors({});
+      setNotice(`已打开文件夹“${picked.name}”，读取 ${loaded.records.length} 条记录。`);
     });
-    setDirty(true);
-    setAttempted(false);
   }
-  function submit(event: FormEvent) {
+  async function save(recordsToSave: SavedEntry[]) {
+    if (!folder) throw new Error('请先选择记录文件夹，再进行测算。录入内容已保留。');
+    const next = await writeRecordFile(folder, recordsToSave, file.revision);
+    setFile(next);
+  }
+  function editCell(index: number, key: keyof EntryDraft, value: string) {
+    setRows(previous => previous.map((r, i) => i === index ? { ...r, [key]: value } : r));
+    setErrors(previous => { const next = { ...previous }; delete next[`${index}.${key}`]; return next; });
+  }
+  async function submit(event: FormEvent) {
     event.preventDefault();
-    setAttempted(true);
-    if (!validated.ok) {
-      const element = formRef.current?.elements.namedItem(Object.keys(validated.errors)[0]);
-      if (element instanceof HTMLElement) element.focus();
+    const issues: Record<string, string> = {};
+    const prepared: SavedEntry[] = [];
+    rows.forEach((row, index) => {
+      if (isEmptyEntry(row)) return;
+      const checked = validateEntry(row, basis);
+      if (!checked.ok) for (const [key, value] of Object.entries(checked.errors)) issues[`${index}.${key}`] = value;
+      else {
+        const previous = editing ? file.records.find(e => e.id === editing) : undefined;
+        const now = new Date().toISOString();
+        prepared.push({ id: previous?.id ?? crypto.randomUUID(), createdAt: previous?.createdAt ?? now, updatedAt: now, ruleVersion: 3, result: calculateEntry(checked.value) });
+      }
+    });
+    setErrors(issues); setProblem('');
+    if (Object.keys(issues).length) {
+      setProblem('部分方案尚未填写完整或参数无效，请检查标出的单元格。');
+      requestAnimationFrame(() => { const element = form.current?.elements.namedItem(Object.keys(issues)[0]); if (element instanceof HTMLElement) element.focus(); });
       return;
     }
-    try {
-      const calculated = calculatePlan(validated.value);
-      setResult(calculated);
-      setDirty(false);
-      const saved = savePlan(browserStorage(), calculated.input, new Date().toISOString());
-      setNotice(saved ? '测算已更新，设置已保存在当前浏览器。' : '测算已完成。本次设置未能保存到浏览器。');
-      if (window.matchMedia('(max-width: 900px)').matches) {
-        requestAnimationFrame(() => resultRef.current?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }));
-      }
-    } catch {
-      setDirty(true);
-      setNotice('本次测算未能完成，请检查参数后重试。上次成功结果已保留。');
-    }
+    if (!prepared.length) { setProblem('请至少完整填写一行方案后再测算。'); return; }
+    await action(async () => {
+      if (editing && !file.records.some(e => e.id === editing)) throw new Error('正在编辑的记录已不存在，请取消编辑后重试。');
+      await save(editing ? file.records.map(e => e.id === editing ? prepared[0] : e) : [...file.records, ...prepared]);
+      setShown(prepared); setRows([emptyEntry(), emptyEntry()]); setEditing(null); setErrors({});
+      if (entryScroll.current) entryScroll.current.scrollLeft = 0;
+      setNotice(`已完成测算并保存 ${prepared.length} 条记录，录入区已清空。`);
+    });
   }
-  function closeReset() {
-    resetDialogRef.current?.close();
-    setResetOpen(false);
-    resetButtonRef.current?.focus();
+  function beginEdit(entry: SavedEntry) {
+    setEditing(entry.id); setBasis(entry.result.input.timeBasis); setRows([entryToDraft(entry.result.input)]); setErrors({}); setProblem('');
+    if (entryScroll.current) entryScroll.current.scrollLeft = 0;
+    form.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
-  function reset() {
-    const cleared = clearPlan(browserStorage());
-    setDraft(createDefaultDraft(new Date().getFullYear()));
-    setResult(null); setDirty(false); setAttempted(false);
-    setNotice(cleared ? '已恢复默认设置。' : '已恢复默认输入，但浏览器保存的数据未能清除，刷新后可能恢复旧设置。');
-    closeReset();
+  async function reload() {
+    await action(async () => {
+      if (!folder) return;
+      const loaded = await readRecordFile(folder); setFile(loaded);
+      setShown(previous => previous.map(e => loaded.records.find(x => x.id === e.id)).filter((e): e is SavedEntry => Boolean(e)));
+      setNotice(`已重新读取 ${loaded.records.length} 条记录，当前录入内容已保留。`);
+    });
   }
-  function openReset() {
-    setResetOpen(true);
-    resetDialogRef.current?.showModal();
+  async function removeRecord() {
+    if (!deleting) return;
+    await action(async () => {
+      await save(file.records.filter(e => e.id !== deleting.id));
+      setShown(previous => previous.filter(e => e.id !== deleting.id));
+      if (editing === deleting.id) { setEditing(null); setRows([emptyEntry(), emptyEntry()]); setErrors({}); }
+      setNotice('记录已从文件中删除。'); dialog.current?.close(); setDeleting(null);
+    });
+  }
+  async function importLegacy() {
+    await action(async () => {
+      const legacy = restorePlan(browserStorage());
+      if (legacy.status !== 'restored') throw new Error('没有可导入的旧版测算设置。');
+      const p = legacy.result.input;
+      const now = new Date().toISOString();
+      const imported = p.scenarios.map((s, index): SavedEntry => {
+        const input = { timeBasis: p.timeBasis, type: index === 0 ? 'bank' as const : 'insurance' as const, name: s.name, rate: s.annualRate,
+          start: p.startYear, annualDeposit: p.annualDeposit, depositYears: p.depositYears, withdrawalStart: p.withdrawalStartYear,
+          annualWithdrawal: p.annualWithdrawal, end: legacy.result.endYear };
+        return { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ruleVersion: 2, result: calculateEntry(input, 2) };
+      });
+      await save([...file.records, ...imported]); setShown(imported); setNotice('旧版设置已导入文件，保留原来的首年计息规则。');
+    });
   }
   return <div className={styles.page}>
-    <Link className={styles.backLink} to="/"><ArrowLeft size={13} />返回工具首页</Link>
-    <div className={styles.pageHeading}><div><span className={styles.eyebrow}><span /> PENSION PLANNER</span><h1>养老金资金计算器</h1><p>用同一份存领计划，比较两种收益假设。让未来每一年的资金安排更清晰。</p></div><span className={styles.modelBadge}><Calculator size={14} />年度假设测算</span></div>
-    <div className={styles.workspace}>
-      <aside className={styles.inputPanel} aria-label="测算参数"><form ref={formRef} onSubmit={submit} noValidate>
-        <div className={styles.inputHeading}><SlidersHorizontal size={16} /><h2>设定你的计划</h2><span>两方案共用</span></div>
-        <section className={styles.formSection}>
-          <fieldset className={styles.basisField}><legend className={styles.srOnly}>计划时间方式</legend><div className={styles.modeOptions}>
-            <label><input type="radio" name="timeBasis" value="year" checked={draft.timeBasis === 'year'} onChange={() => switchTimeBasis('year')} /><span>按年份</span></label>
-            <label><input type="radio" name="timeBasis" value="age" checked={draft.timeBasis === 'age'} onChange={() => switchTimeBasis('age')} /><span>按年龄</span></label>
-          </div></fieldset>
-          <div className={styles.formGrid}>
-            <Field name="annualDeposit" label="每年存入金额" value={draft.annualDeposit} onChange={v => edit('annualDeposit', v)} unit="元" inputMode="decimal" error={errors.annualDeposit} />
-            <Field name="annualWithdrawal" label="每年计划领取金额" value={draft.annualWithdrawal} onChange={v => edit('annualWithdrawal', v)} unit="元" inputMode="decimal" error={errors.annualWithdrawal} />
-            {draft.timeBasis === 'age'
-              ? <Field name="startAge" label="开始存入年龄" value={draft.startAge} onChange={v => edit('startAge', v)} unit="岁" error={errors.startAge} />
-              : <Field name="startYear" label="测算起始年份" value={draft.startYear} onChange={v => edit('startYear', v)} unit="年" error={errors.startYear} />}
-            <Field name="depositYears" label="存入年数" value={draft.depositYears} onChange={v => edit('depositYears', v)} unit="年" error={errors.depositYears} />
-            {draft.timeBasis === 'age' ? <>
-              <Field name="withdrawalStartAge" label="开始领取年龄" value={draft.withdrawalStartAge} onChange={v => edit('withdrawalStartAge', v)} unit="岁" error={errors.withdrawalStartAge} />
-              <Field name="withdrawalEndAge" label="领取结束年龄" value={draft.withdrawalEndAge} onChange={v => edit('withdrawalEndAge', v)} unit="岁" error={errors.withdrawalEndAge} />
-            </> : <>
-              <Field name="withdrawalStartYear" label="开始领取年份" value={draft.withdrawalStartYear} onChange={v => edit('withdrawalStartYear', v)} unit="年" error={errors.withdrawalStartYear} />
-              {draft.mode === 'fixed' && <Field name="withdrawalYears" label="计划领取年数" value={draft.withdrawalYears} onChange={v => edit('withdrawalYears', v)} unit="年" error={errors.withdrawalYears} />}
-            </>}
-          </div>
-          {draft.timeBasis === 'year' && <fieldset className={styles.modeField}><legend className={styles.srOnly}>领取方式</legend><div className={styles.modeOptions}>
-            <label><input type="radio" name="mode" value="fixed" checked={draft.mode === 'fixed'} onChange={() => edit('mode', 'fixed')} /><span>指定年数</span></label>
-            <label><input type="radio" name="mode" value="until-depleted" checked={draft.mode === 'until-depleted'} onChange={() => edit('mode', 'until-depleted')} /><span>领至耗尽</span></label>
-          </div></fieldset>}
-          <p className={styles.sharedHint}>年初存入 · 年末领取 · {draft.timeBasis === 'age' ? '含结束年龄当年，最高 105 岁' : draft.mode === 'fixed' ? '存入与领取分年进行' : '最多测算 120 年'}</p>
-        </section>
-        <section className={`${styles.formSection} ${styles.compareSection}`}>
-          <SectionHeading title="方案对比" /><p className={styles.scenarioIntro}>上方计划只填一次，下面仅设置名称和利率</p>
-          {draft.scenarios.map((s, i) => <div key={s.id} className={`${styles.scenarioRow} ${i === 1 ? styles.scenarioRowB : ''}`}>
-            <span className={styles.rowLetter} aria-hidden="true">{s.id}</span>
-            <Field name={`scenarios.${i}.name`} label={`方案 ${s.id} 名称`} shortLabel="名称" value={s.name} inputMode="text" onChange={v => editScenario(i, 'name', v)} error={errors[`scenarios.${i}.name`]} />
-            <Field name={`scenarios.${i}.annualRate`} label={`方案 ${s.id} 假设年收益率`} shortLabel="年收益率" value={s.annualRate} inputMode="decimal" unit="%" onChange={v => editScenario(i, 'annualRate', v)} error={errors[`scenarios.${i}.annualRate`]} />
-          </div>)}
-          <p className={styles.inlineHelp}><Info size={12} /> 利率为固定假设，默认值仅用于演示。</p>
-        </section>
-        <div className={styles.formBottom}><Timeline draft={draft} endYear={!dirty ? result?.endYear : undefined} />
-          {attempted && !validated.ok && <p role="alert" className={styles.formError}>{errors.form ?? '请修正上方参数后再测算。'}</p>}
-          <button type="submit" className={`button primary ${styles.calculateButton}`}><Sparkles size={16} />开始测算<ArrowRight size={16} /></button>
-          <button type="button" ref={resetButtonRef} onClick={openReset} className={styles.resetButton}><RotateCcw size={12} />恢复默认</button>
-          <span className={styles.storageNote}><LockKeyhole size={11} /> 设置保存在当前浏览器，清理后可能丢失</span>
-        </div>
-      </form></aside>
-      <div ref={resultRef} className={styles.results} aria-label="测算结果">
-        {notice && <p className={styles.notice} role="status">{notice}</p>}
-        {result ? <Results result={result} dirty={dirty} /> : <div className={styles.emptyState}><span className={styles.emptyIcon}><Calculator size={32} strokeWidth={1.4} /></span><span className={styles.eyebrow}>A CLEARER TOMORROW</span><h2>未来，从一份计划开始</h2><p>设置参数后开始测算。<br />这里会呈现两种方案的资金变化与年度明细。</p><div><span><Check size={13} /> 同条件对比</span><span><Check size={13} /> 精确到分</span><span><Check size={13} /> 逐年看明细</span></div><span className={styles.emptyLine} /><p className={styles.emptyFootnote}>先设定每年的存入与领取，再看看不同收益假设会带来怎样的变化。</p></div>}
-        <details className={styles.rules}><summary><span><Info size={15} />了解本工具的计算规则</span><ChevronDown size={15} /></summary><div><p>每年按“年初余额 → 年初存入 → 当年收益 → 年末领取 → 年末余额”的顺序计算。初始余额为 0，存入与领取不在同一年发生，等待期间继续计算收益。</p><p>年度收益按分舍入，正负恰好半分时均远离 0 舍入。余额不足时领取剩余金额，不透支；“足额领取年数”不包含最后一笔不足额领取。</p><p>每个方案全程使用固定的假设年收益率。银行与保险仅是方案名称，本工具不模拟真实保险合同现金价值、终身年金或保证利益，也未计入通胀、税费和手续费。</p><p>按年龄模式将整岁视为年度周期，最高 105 岁，包含结束年龄当年的领取。存入与领取年龄不能重叠。按年份的领至耗尽模式最多测算 120 年。首次不足额年份仅描述本次共同时间轴中已计算的年份；到达上限尚未耗尽，不代表可以无限领取。</p></div></details>
-      </div>
-    </div>
-    <dialog ref={resetDialogRef} className={styles.dialog} aria-labelledby="reset-title" aria-describedby="reset-description" onCancel={e => { e.preventDefault(); closeReset(); }} onClose={() => setResetOpen(false)}><h2 id="reset-title">恢复默认设置？</h2><p id="reset-description">将清除本工具保存的测算设置和当前结果。其他工具的数据不受影响。</p><div><button type="button" className="button secondary" autoFocus onClick={closeReset}>保留设置</button><button type="button" className="button primary" onClick={reset}>确认恢复</button></div>{resetOpen && <span className={styles.srOnly}>按 Escape 可取消</span>}</dialog>
+    <Link className={styles.backLink} to="/"><ArrowLeft size={14} />返回工具首页</Link>
+    <div className={styles.pageHeading}><div><span className={styles.eyebrow}>PENSION PLANNER</span><h1>养老金资金计算器</h1><p>一行一个方案，按自己的节奏存入与领取。把每一次规划，留在自己的文件夹里。</p></div><span className={styles.badge}><Calculator size={15} />年度假设测算</span></div>
+    <section className={styles.folderBar} aria-label="记录文件夹"><FolderOpen size={23} /><div><strong>{folder ? `记录文件夹：${folder.name}` : '为测算记录选择一个文件夹'}</strong><p>{folder ? `记录文件：${RECORD_FILENAME} · 刷新页面后重新选择此文件夹即可读取` : '记录以文件保存。首次测算前请选择文件夹，已有记录会自动读取。'}</p></div><button type="button" className="button secondary" disabled={busy} onClick={pickFolder}>{folder ? '切换文件夹' : '选择记录文件夹'}</button>{folder && <button className={styles.textButton} disabled={busy} onClick={reload}>重新读取</button>}</section>
+    <section className={styles.inputPanel} aria-label="方案录入">
+      <div className={styles.sectionTitle}><div><h2>{editing ? '编辑已保存方案' : '设定你的计划'}</h2><p>每行一个方案，空行跳过；左右滚动可填写全部字段。</p></div><fieldset className={styles.modeSwitch} disabled={busy}><legend className={styles.srOnly}>录入时间方式</legend>{(['age', 'year'] as const).map(value => <label key={value}><input type="radio" name="timeBasis" value={value} checked={basis === value} onChange={() => { setBasis(value); setRows(previous => previous.map(r => ({ ...r, start: '', withdrawalStart: '', end: '' }))); setErrors({}); setProblem(''); }} /><span>{value === 'age' ? '按年龄' : '按年份'}</span></label>)}</fieldset></div>
+      <form ref={form} onSubmit={submit} noValidate>
+        <fieldset className={styles.editFieldset} disabled={busy}>
+          <div ref={entryScroll} className={styles.tableScroll} tabIndex={0} role="region" aria-label="方案录入列表，可横向滚动"><table className={styles.entryTable}><caption className={styles.srOnly}>养老金方案录入，时间单位{unit(basis)}，金额单位元</caption><thead><tr><th>序号</th>{columns.map(c => <th key={c.key}>{c.title}{['start', 'withdrawalStart', 'end'].includes(c.key) ? `（${basis === 'age' ? '年龄' : '年份'}）` : ''}</th>)}<th>操作</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><th scope="row">{index + 1}</th>{columns.map(c => {
+            const id = `${index}.${c.key}`, error = errors[id];
+            return <td key={c.key}><label className={styles.srOnly} htmlFor={id}>{`第 ${index + 1} 行${c.title}`}</label>{c.key === 'type'
+              ? <select id={id} name={id} value={row.type} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} onChange={e => editCell(index, c.key, e.target.value)}><option value="">请选择</option><option value="bank">银行</option><option value="insurance">保险</option></select>
+              : <input id={id} name={id} value={row[c.key]} inputMode={c.mode ?? 'numeric'} autoComplete="off" placeholder={c.key === 'end' && basis === 'age' ? '≤105' : undefined} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} onChange={e => editCell(index, c.key, e.target.value)} />}{error && <span id={`${id}-error`} className={styles.cellError}>{error}</span>}</td>;
+          })}<td><button type="button" className={styles.iconButton} aria-label={`删除第 ${index + 1} 行`} disabled={rows.length <= 1 || Boolean(editing)} onClick={() => { setRows(previous => previous.filter((_, i) => i !== index)); setErrors({}); }}><Trash2 size={15} /></button></td></tr>)}</tbody></table></div>
+          <div className={styles.formActions}><button type="button" className={styles.textButton} disabled={Boolean(editing)} onClick={() => setRows(previous => [...previous, emptyEntry()])}><Plus size={15} />添加方案</button><p>年初存入 · 年末领取 · 含结束当年{basis === 'age' ? ' · 最高 105 岁' : ' · 最多 120 年'}</p>{editing && <button type="button" className="button secondary" onClick={() => { setEditing(null); setRows([emptyEntry(), emptyEntry()]); setErrors({}); setProblem(''); }}>取消编辑</button>}<button type="submit" className="button primary">{busy ? '正在保存…' : editing ? '重新测算并保存' : '测算并保存'}</button></div>
+        </fieldset>
+      </form>
+      <div className={styles.rulesStrip}><span><b>银行</b> 从存入第一年起按年复利</span><span><b>保险</b> 存入期不计息，最后存入的下一年起按年复利</span></div>
+    </section>
+    {problem && !deleting && <p role="alert" className={styles.error}>{problem}</p>}{notice && <p role="status" className={styles.notice}>{notice}</p>}
+    {shown.length > 0 && <ResultView entries={shown} />}
+    <section className={styles.history} aria-label="测算记录"><div className={styles.sectionTitle}><div><span className={styles.eyebrow}>SAVED PLANS</span><h2>测算记录 <small>{file.records.length} 条</small></h2></div><button className={styles.textButton} disabled={busy || !folder} onClick={importLegacy}>导入旧版测算</button></div>
+      <div className={styles.searchBar}><label><Search size={16} /><span className={styles.srOnly}>搜索记录</span><input placeholder="搜索方案名称" value={query} onChange={e => setQuery(e.target.value)} /></label><select aria-label="筛选记录类型" value={filter} onChange={e => setFilter(e.target.value)}><option value="all">全部类型</option><option value="bank">银行</option><option value="insurance">保险</option></select></div>
+      {records.length ? <div className={styles.tableScroll} tabIndex={0} role="region" aria-label="测算记录列表，可横向滚动"><table className={styles.historyTable}><caption className={styles.srOnly}>保存在当前文件夹的测算记录</caption><thead><tr>{['类型', '方案名称', '开始存入', '年存入额（元）', '存入年数', '年化率', '领取安排', '保存时间', '操作'].map(t => <th key={t}>{t}</th>)}</tr></thead><tbody>{records.map(e => {
+        const p = e.result.input;
+        return <tr key={e.id}><td><span className={p.type === 'bank' ? styles.bankTag : styles.insuranceTag}>{productNames[p.type]}</span></td><th scope="row">{p.name}{e.ruleVersion === 2 && <small className={styles.legacy}>旧版规则</small>}</th><td>{p.start} {unit(p.timeBasis)}</td><td>{formatMoney(p.annualDeposit)}</td><td>{p.depositYears} 年</td><td>{p.rate}%</td><td>{p.withdrawalStart}—{p.end} {unit(p.timeBasis)}<small className={styles.subtext}>每年 {formatMoney(p.annualWithdrawal)} 元</small></td><td>{new Date(e.updatedAt).toLocaleString('zh-CN', { hour12: false })}</td><td><div className={styles.recordActions}><button disabled={busy} onClick={() => setShown([e])}>查看</button><button disabled={busy} onClick={() => beginEdit(e)}>编辑</button><button disabled={busy} onClick={() => { setProblem(''); setDeleting(e); dialog.current?.showModal(); }}>删除</button></div></td></tr>;
+      })}</tbody></table></div> : <div className={styles.emptyState}><FolderOpen size={28} /><h3>{file.records.length ? '没有匹配的记录' : '你的下一份计划，从这里开始'}</h3><p>{file.records.length ? '试试其他名称或类型。' : folder ? '填写上方列表并测算，记录会保存在所选文件夹。' : '选择记录文件夹，查看已有方案或保存新的测算。'}</p></div>}
+    </section>
+    <details className={styles.rules}><summary>了解计算与文件保存规则</summary><p>每年依次计算：年初存入、当年收益、年末领取、年末余额。银行从首年计息；保险存入期间不计息，存完后的下一年对全部本金开始计息，此后收益计入本金逐年复利。存入与领取不在同一年发生。</p><p>年龄按整岁年度周期计算，最高 105 岁；领取包含结束年龄或年份当年。余额不足时仅领取剩余资金，不透支，计划缺口继续记录至结束。年度收益保留到分，正负恰好半分均远离 0 舍入。</p><p>测算成功且文件写入完成后才清空录入区，恢复两个空行。编辑记录会更新原记录；切换时间方式会清空当前行的时间字段，请重新填写。删除记录需要确认。</p><p>记录只写入你选择的文件夹，本工具不会将新记录存入浏览器。刷新后重新选择文件夹读取。备份或跨设备使用时复制记录文件即可。文件夹被撤销访问或文件保存失败时会保留当前录入内容。请使用电脑上的 Edge 或 Chrome 选择文件夹。</p><p>利率均为固定假设。此处的银行和保险仅按指定起息规则模拟，不代表真实保险合同利益，未计入通胀、税费和手续费。</p></details>
+    <dialog ref={dialog} className={styles.dialog} aria-labelledby="delete-title" onCancel={event => { if (busy) event.preventDefault(); else setDeleting(null); }}><h2 id="delete-title">删除这条测算记录？</h2><p>“{deleting?.result.input.name}”将从记录文件中删除。</p>{problem && <p role="alert" className={styles.error}>{problem}</p>}<div><button className="button secondary" disabled={busy} onClick={() => { dialog.current?.close(); setDeleting(null); }}>保留记录</button><button className="button primary" disabled={busy} onClick={removeRecord}>确认删除</button></div></dialog>
   </div>;
 }
