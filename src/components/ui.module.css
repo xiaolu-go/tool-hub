@@ -1,0 +1,14 @@
+.field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.field label { font-size: 13px; font-weight: 600; color: var(--text); }
+.inputWrap { display: flex; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; overflow: hidden; min-height: 43px; transition: border-color .15s, box-shadow .15s; }
+.inputWrap:focus-within { border-color: var(--green); box-shadow: 0 0 0 3px #1b574712; }
+.inputWrap input { min-width: 0; width: 100%; border: 0; outline: none; background: transparent; padding: 11px 12px; font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
+.unit { flex-shrink: 0; color: var(--muted); font-size: 12px; padding-right: 12px; }
+.invalid { border-color: var(--danger); }
+.hint, .error { font-size: 11px; line-height: 1.6; }
+.hint { color: var(--muted); }
+.error { color: var(--danger); }
+.sectionHeading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 19px; }
+.sectionHeading > div { display: flex; align-items: center; gap: 9px; }
+.sectionHeading h2 { margin: 0; font-size: 16px; letter-spacing: -.3px; }
+.sectionNumber { font-size: 10px; font-weight: 700; color: var(--green); background: var(--green-tint); padding: 4px 6px; border-radius: 5px; }
