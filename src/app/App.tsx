@@ -12,7 +12,7 @@ function HomePage() {
         <h1>把生活的计划，<br />变成<span>看得见的未来。</span></h1>
         <p>简单、专注的个人工具。梳理当下，测算未来，<br className={styles.desktopBreak} />让每一个关于资金的决定，都多一份清晰。</p>
         <Link to={tools[0].path!} className="button primary">开始养老金测算 <ArrowUpRight size={17} /></Link>
-        <span className={styles.heroNote}><LockKeyhole size={13} /> 无需注册 · 设置保存在当前浏览器</span>
+        <span className={styles.heroNote}><LockKeyhole size={13} /> 无需注册 · 数据在本地处理</span>
       </div>
       <div className={styles.illustration} aria-label="年度资金规划示意图">
         <div className={styles.miniTop}><span className={styles.miniIcon}><BarChart3 size={20} /></span><div><strong>为从容的退休生活</strong><span>从一份清晰的计划开始</span></div><span className={styles.demoTag}>规划示意</span></div>
@@ -59,7 +59,7 @@ export function App() {
     <a className="skip-link" href="#main-content" onClick={e => { e.preventDefault(); document.getElementById('main-content')?.focus(); }}>跳至主要内容</a>
     <header className={styles.header}><div className={styles.headerInner}>
       <Link className={styles.brand} to="/" aria-label="tool-hub 首页"><span className={styles.brandMark}><BarChart3 size={21} /></span><strong>tool-hub</strong><span className={styles.brandDivider} /><span className={styles.brandCaption}>个人工具集</span></Link>
-      <nav aria-label="主导航"><NavLink end to="/" className={({ isActive }) => isActive ? styles.activeNav : ''}>工具首页</NavLink><NavLink to={tools[0].path!} className={({ isActive }) => isActive ? styles.activeNav : ''}>养老金测算 <ChevronRight size={12} /></NavLink></nav>
+      <nav aria-label="主导航"><NavLink end to="/" className={({ isActive }) => isActive ? styles.activeNav : ''}>工具首页</NavLink>{tools.filter(tool => tool.status === 'available').map(tool => <NavLink key={tool.id} to={tool.path!} className={({ isActive }) => isActive ? styles.activeNav : ''}>{tool.id === 'pension-calculator' ? '养老金测算' : tool.name} <ChevronRight size={12} /></NavLink>)}</nav>
     </div></header>
     <main id="main-content" tabIndex={-1} className={styles.main}><Suspense fallback={<div className={styles.loading} role="status"><Sparkles size={20} /> 正在打开工具…</div>}><Routes>
       <Route path="/" element={<HomePage />} />

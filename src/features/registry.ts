@@ -1,5 +1,5 @@
 import { lazy } from 'react';
-import { ChartNoAxesCombined, NotebookPen } from 'lucide-react';
+import { ChartNoAxesCombined, ImagePlus, NotebookPen } from 'lucide-react';
 
 export const tools = [
   {
@@ -8,6 +8,13 @@ export const tools = [
     icon: ChartNoAxesCombined, status: 'available' as const, path: '/tools/pension-calculator',
     component: lazy(() => import('./pension-calculator/CalculatorPage')),
     tags: ['年度测算', '方案记录'],
+  },
+  {
+    id: 'image-editor', name: '图片处理',
+    description: '裁剪、缩放、旋转和转换图片格式，添加预设或自定义水印。本地处理，轻松下载。',
+    icon: ImagePlus, status: 'available' as const, path: '/tools/image-editor',
+    component: lazy(() => import('./image-editor/ImageEditorPage')),
+    tags: ['基础编辑', '文字水印'],
   },
   {
     id: 'income-planner', name: '收支规划',
